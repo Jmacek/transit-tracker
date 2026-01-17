@@ -17,9 +17,11 @@ esp32:
 
 external_components:
   - source: github://avwuff/ESPHome-HUB75-MatrixDisplayWrapper@4fc1f26500b97a39693cd8af4ba2abb75f83ce0b
-  - source: github://tjhorner/esphome-custom-components@1909519fa93747c232b5dbc41f5ada3c41cc2257
-    components: [ serial_rpc ]
-  - source: github://tjhorner/esphome-transit-tracker@main
+  # serial_rpc is incompatible with newer ESPHome (get_hw_serial removed)
+  # Not needed — using captive_portal for WiFi setup and web_server for config
+  # - source: github://tjhorner/esphome-custom-components@1909519fa93747c232b5dbc41f5ada3c41cc2257
+  #   components: [ serial_rpc ]
+  - source: github://Jmacek/esphome-transit-tracker@main
     refresh: 0s
 
 logger:
@@ -47,6 +49,11 @@ update:
     name: Firmware Update
     source: https://transit-tracker.eastsideurbanism.org/firmware/manifest.json
 
+sun:
+  latitude: 47.6062
+  longitude: -122.3321
+  id: sun_component
+
 switch:
   - platform: template
     id: flip_display_config
@@ -68,12 +75,44 @@ switch:
       - lambda: id(tracker).set_scroll_headsigns(true);
     turn_off_action:
       - lambda: id(tracker).set_scroll_headsigns(false);
+  - platform: template
+    id: show_line_icons_config
+    name: "Show Line Icons"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - lambda: id(tracker).set_show_line_icons(true);
+    turn_off_action:
+      - lambda: id(tracker).set_show_line_icons(false);
+  - platform: template
+    id: auto_brightness_enabled
+    name: "Auto Brightness"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+interval:
+  - interval: 1min
+    then:
+      - if:
+          condition:
+            switch.is_on: auto_brightness_enabled
+          then:
+            - light.turn_on:
+                id: display_brightness
+                brightness: !lambda |-
+                  auto elevation = id(sun_component).elevation();
+                  float clamped = std::max(-6.0f, std::min(20.0f, (float)elevation));
+                  float normalized = (clamped + 6.0f) / 26.0f;
+                  float min_b = 1.5f / 255.0f;
+                  float max_b = id(day_brightness_max).state / 255.0f;
+                  return min_b + normalized * (max_b - min_b);
 
 button:
   - platform: restart
     name: "Restart"
   - platform: template
     id: reload_tracker
+    name: "Reload Tracker"
     on_press:
       - lambda: |-
           id(tracker).reconnect();
@@ -119,6 +158,12 @@ text:
         lambda: |
           id(tracker).set_route_styles_from_text(id(route_styles_config)->state);
   - <<: *config_text_common
+    id: sort_order_config
+    on_value:
+      then:
+        lambda: |
+          id(tracker).set_sort_order_from_text(id(sort_order_config)->state);
+  - <<: *config_text_common
     id: now_str_config
     initial_value: "min"
     on_value:
@@ -158,7 +203,7 @@ select:
     on_value:
       then:
         lambda: |-
-          id(tracker).set_display_departure_times(id(time_display_config)->state == "departure");
+          id(tracker).set_display_departure_times(id(time_display_config)->current_option() == "departure");
   - platform: template
     id: time_units_config
     optimistic: true
@@ -171,9 +216,9 @@ select:
       then:
         lambda: |-
           transit_tracker::UnitDisplay unit_display;
-          if (id(time_units_config)->state == "long") {
+          if (id(time_units_config)->current_option() == "long") {
             unit_display = transit_tracker::UnitDisplay::UNIT_DISPLAY_LONG;
-          } else if (id(time_units_config)->state == "short") {
+          } else if (id(time_units_config)->current_option() == "short") {
             unit_display = transit_tracker::UnitDisplay::UNIT_DISPLAY_SHORT;
           } else {
             unit_display = transit_tracker::UnitDisplay::UNIT_DISPLAY_NONE;
@@ -190,12 +235,21 @@ select:
     on_value:
       then:
         lambda: |-
-          id(tracker).set_list_mode(id(list_mode_config)->state);
+          id(tracker).set_list_mode(id(list_mode_config)->current_option());
 
 number:
   - platform: hub75_matrix_display
     matrix_id: matrix
     id: display_brightness_number
+  - platform: template
+    id: day_brightness_max
+    name: "Day Brightness Max"
+    min_value: 1.5
+    max_value: 255
+    step: 1
+    initial_value: 57
+    optimistic: true
+    restore_value: true
 
 output:
   - platform: template
@@ -212,6 +266,7 @@ light:
     id: display_brightness
     output: display_brightness_output
     restore_mode: RESTORE_DEFAULT_ON
+    gamma_correct: 1.0
 
 script:
   - id: dim_display
@@ -220,7 +275,7 @@ script:
     then:
       - light.dim_relative:
           id: display_brightness
-          relative_brightness: !lambda "return up ? 0.2 : -0.2;"
+          relative_brightness: !lambda "return up ? 0.04 : -0.04;"
           transition_length: 0.1s
 
 binary_sensor:
@@ -317,8 +372,9 @@ time:
     timezone: America/Los_Angeles
 
 web_server:
+  js_include: "./transit_config_ui.js"
 
 transit_tracker:
   id: tracker
 
-serial_rpc:
+# serial_rpc:  # Disabled — see external_components comment above

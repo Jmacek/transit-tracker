@@ -16,10 +16,7 @@
   let sortOrder = [];           // [routeId|stopId, ...]
   let abbreviations = [];       // [{from, to}, ...]
   let routeStyles = [];         // [{routeId, displayName, color}, ...]
-  let selectedRoutes = new Set();
   let stopCache = {};           // stopId -> {name, routes: [...]}
-  let foundStops = [];
-  let foundRoutes = [];
   let isDirty = false;          // Track if text fields need saving
 
   // ============================================================================
@@ -27,8 +24,9 @@
   // ============================================================================
 
   function init() {
-    // Load SortableJS from CDN
-    loadSortableJS().then(() => {
+    // Load SortableJS and Leaflet from CDN
+    loadMaterialIcon();
+    Promise.all([loadSortableJS(), loadLeaflet()]).then(() => {
       const panel = createConfigPanel();
       document.body.insertBefore(panel, document.body.firstChild);
       attachEventListeners();
@@ -50,6 +48,41 @@
       script.onerror = () => {
         console.warn('SortableJS failed to load, drag and drop may not work on mobile');
         resolve(); // Continue anyway
+      };
+      document.head.appendChild(script);
+    });
+  }
+
+  let Leaflet = null;
+
+  function loadMaterialIcon() {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&icon_names=near_me';
+    document.head.appendChild(link);
+  }
+
+  function loadLeaflet() {
+    return new Promise((resolve) => {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css';
+      document.head.appendChild(link);
+
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.js';
+      script.onload = () => {
+        // Capture Leaflet's L immediately before ESPHome's Lit overwrites it
+        if (window.L && typeof window.L.map === 'function') {
+          Leaflet = window.L;
+        } else {
+          console.warn('Leaflet loaded but L.map not available');
+        }
+        resolve();
+      };
+      script.onerror = () => {
+        console.warn('Leaflet failed to load, map will not be available');
+        resolve();
       };
       document.head.appendChild(script);
     });
@@ -1292,46 +1325,95 @@
           <h3>Edit Routes</h3>
           <button class="modal-close" id="modal-close">&times;</button>
         </div>
-        
+
+        <h4>Find Stops</h4>
+        <div class="search-row">
+          <div style="flex:1;position:relative;">
+            <input type="text" id="search-location" class="search-input" placeholder="Address, zip code, or lat,lng" autocomplete="off" style="width:100%;box-sizing:border-box;">
+            <ul id="search-suggestions" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:1001;list-style:none;padding:0;margin:2px 0 0;background:var(--bg-secondary);border:1px solid var(--border-input);border-radius:4px;max-height:200px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,0.3);"></ul>
+          </div>
+          <button class="btn btn-primary" id="btn-search-stops">Search</button>
+          <button class="btn btn-secondary" id="btn-use-location" title="My location" style="padding:8px 10px;line-height:1;display:flex;align-items:center;"><span class="material-symbols-outlined" style="font-size:20px;">near_me</span></button>
+        </div>
+        <div id="search-status" style="margin-top:8px;"></div>
+
+        <div id="stop-map-wrap" class="hidden" style="margin-top:12px;position:relative;">
+          <div id="stop-map" style="height:300px;border-radius:6px;border:1px solid var(--border-color);"></div>
+          <div style="position:absolute;top:10px;right:10px;z-index:1000;display:flex;flex-direction:column;gap:4px;">
+            <button class="btn btn-secondary" id="btn-search-visible" style="padding:6px 10px;font-size:0.8em;opacity:0.9;">Search visible stops</button>
+            <button class="btn btn-primary hidden" id="btn-search-selected" style="padding:6px 10px;font-size:0.8em;opacity:0.9;">Search selected</button>
+            <button class="btn btn-secondary hidden" id="btn-clear-selected" style="padding:4px 10px;font-size:0.75em;opacity:0.9;">Clear selection</button>
+          </div>
+        </div>
+
+        <div id="route-panel" class="hidden" style="margin-top:12px;"></div>
+
+        <h4 style="margin-top:16px;">Your Routes</h4>
         <p class="helper-text">Drag to reorder. Top routes display first.</p>
         <ul class="route-list" id="modal-route-list"></ul>
-        
-        <h4 style="margin-top:16px;">Add Route</h4>
-        <div class="search-row">
-          <input type="text" id="search-location" class="search-input" placeholder="Address or lat,lng">
-          <button class="btn btn-primary" id="btn-search-stops">Search</button>
-        </div>
-        <div class="radius-row" style="margin-top:8px;display:flex;align-items:center;gap:12px;">
-          <label style="color:var(--text-primary);font-size:0.9em;">Radius:</label>
-          <input type="range" id="search-radius" min="0.05" max="0.5" step="0.05" value="0.125" style="flex:1;max-width:120px;">
-          <span id="radius-display" style="color:var(--text-heading);font-size:0.9em;">0.13 mi</span>
-        </div>
-        
-        <div id="stop-results" class="hidden" style="margin-top:12px;"></div>
-        <div id="route-results" class="hidden" style="margin-top:12px;"></div>
-        <div id="search-status" style="margin-top:8px;"></div>
       </div>
     `;
 
     document.body.appendChild(overlay);
 
-    // Render current routes
     renderModalRouteList();
 
-    // Attach modal event listeners
     document.getElementById('modal-close').addEventListener('click', closeRoutesModal);
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) closeRoutesModal();
     });
 
     document.getElementById('btn-search-stops').addEventListener('click', searchStops);
-    document.getElementById('search-location').addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') searchStops();
+    const searchInput = document.getElementById('search-location');
+    searchInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        hideSuggestions();
+        searchStops();
+      }
     });
-    document.getElementById('search-radius').addEventListener('input', updateRadiusDisplay);
+    searchInput.addEventListener('input', debounceAutocomplete);
+    searchInput.addEventListener('focus', () => { if (searchInput.value.length >= 5) debounceAutocomplete(); });
+    searchInput.addEventListener('blur', () => setTimeout(hideSuggestions, 200));
+    document.getElementById('btn-use-location').addEventListener('click', searchFromCurrentLocation);
+
+    // Fetch approximate location in background for search biasing
+    if (!locationBias) {
+      fetch('https://ipapi.co/json/').then(r => r.json()).then(data => {
+        if (data.latitude && data.longitude) {
+          locationBias = { lat: data.latitude, lng: data.longitude };
+        }
+      }).catch(() => {});
+    }
+    document.getElementById('btn-search-visible').addEventListener('click', searchVisibleStops);
+    document.getElementById('btn-search-selected').addEventListener('click', searchSelectedStops);
+    document.getElementById('btn-clear-selected').addEventListener('click', clearStopSelection);
+
+    // Listen for "+ Add" clicks from inside Leaflet popups
+    document.addEventListener('tt-add-route', (e) => {
+      const d = e.detail;
+      addRoute(d.routeId, d.stopId, d.routeName, d.headsign, d.routeColor || null, d.stopName);
+      const stop = mapStopMarkers[d.stopId]?.stop;
+      if (stop) showRoutesPopup(stop);
+    });
+
+    // Listen for "Select for search" clicks from inside Leaflet popups
+    document.addEventListener('tt-toggle-stop', (e) => {
+      const stopId = e.detail.stopId;
+      toggleStopSelection(stopId);
+      const stop = mapStopMarkers[stopId]?.stop;
+      if (stop) showRoutesPopup(stop);
+    });
   }
 
   function closeRoutesModal() {
+    if (stopMap) {
+      stopMap.remove();
+      stopMap = null;
+    }
+    mapStopMarkers = {};
+    selectedStopIds.clear();
+    activePopupStopId = null;
+    mapMoveTimer = null;
     const modal = document.getElementById('routes-modal');
     if (modal) modal.remove();
     updateRoutesSummary();
@@ -1711,10 +1793,95 @@
   // SEARCH STOPS & ROUTES
   // ============================================================================
 
-  function updateRadiusDisplay() {
-    const miles = parseFloat(document.getElementById('search-radius').value);
-    const blocks = Math.round(miles / 0.0625);
-    document.getElementById('radius-display').textContent = `${miles.toFixed(2)} mi (~${blocks} blks)`;
+  let stopMap = null;
+  let mapStopMarkers = {};   // stopId -> {marker, stop}
+  let selectedStopIds = new Set();
+  let searchMarker = null;
+  let mapMoveTimer = null;
+  let routePanelRoutes = [];
+  let activePopupStopId = null;
+
+  let autocompleteTimer = null;
+  let locationBias = null; // {lat, lng} for biasing search results
+
+  function debounceAutocomplete() {
+    clearTimeout(autocompleteTimer);
+    const query = document.getElementById('search-location').value.trim();
+    if (query.length < 5 || query.match(/^-?\d+\.?\d*,\s*-?\d+\.?\d*$/) || query.match(/^\d{5}$/)) {
+      hideSuggestions();
+      return;
+    }
+    autocompleteTimer = setTimeout(() => fetchSuggestions(query), 300);
+  }
+
+  async function fetchSuggestions(query) {
+    try {
+      let url = `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=5&lang=en`;
+      if (stopMap) {
+        const center = stopMap.getCenter();
+        url += `&lat=${center.lat}&lon=${center.lng}&location_bias_scale=0.5`;
+      } else if (locationBias) {
+        url += `&lat=${locationBias.lat}&lon=${locationBias.lng}&location_bias_scale=0.5`;
+      }
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if (!data.features || data.features.length === 0) {
+        hideSuggestions();
+        return;
+      }
+      showSuggestions(data.features);
+    } catch (err) {
+      hideSuggestions();
+    }
+  }
+
+  function formatPhotonResult(props) {
+    const parts = [];
+    // Build address: "121 Stewart Street"
+    if (props.housenumber && props.street) {
+      parts.push(`${props.housenumber} ${props.street}`);
+    } else if (props.street) {
+      parts.push(props.street);
+    } else if (props.name) {
+      parts.push(props.name);
+    }
+    if (props.city) parts.push(props.city);
+    if (props.state) parts.push(props.state);
+    if (props.country && props.country !== 'United States') parts.push(props.country);
+    return parts.join(', ') || 'Unknown location';
+  }
+
+  function showSuggestions(features) {
+    const list = document.getElementById('search-suggestions');
+    if (!list) return;
+
+    list.innerHTML = features.map((f) => {
+      const label = formatPhotonResult(f.properties);
+      const coords = f.geometry.coordinates;
+      return `<li data-lat="${coords[1]}" data-lng="${coords[0]}"
+        style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--border-color);color:var(--text-primary);font-size:0.9em;"
+        onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background=''">${escapeHtml(label)}</li>`;
+    }).join('');
+
+    list.style.display = 'block';
+
+    list.querySelectorAll('li').forEach(item => {
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const lat = parseFloat(item.dataset.lat);
+        const lng = parseFloat(item.dataset.lng);
+        document.getElementById('search-location').value = item.textContent;
+        hideSuggestions();
+        clearStatus('search-status');
+        initOrUpdateMap(lat, lng);
+        loadStopsInBounds();
+      });
+    });
+  }
+
+  function hideSuggestions() {
+    const list = document.getElementById('search-suggestions');
+    if (list) list.style.display = 'none';
   }
 
   async function searchStops() {
@@ -1726,143 +1893,328 @@
 
     showStatus('search-status', 'Searching...', 'info');
 
-    document.getElementById('stop-results').classList.add('hidden');
-    document.getElementById('route-results').classList.add('hidden');
-
     let lat, lng;
     const coordMatch = input.match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
+
+    const zipMatch = input.match(/^\d{5}$/);
 
     if (coordMatch) {
       lat = parseFloat(coordMatch[1]);
       lng = parseFloat(coordMatch[2]);
+    } else if (zipMatch) {
+      try {
+        const resp = await fetch(`https://api.zippopotam.us/us/${input}`);
+        if (!resp.ok) {
+          showStatus('search-status', 'Zip code not found', 'error');
+          return;
+        }
+        const data = await resp.json();
+        if (!data.places || data.places.length === 0) {
+          showStatus('search-status', 'Zip code not found', 'error');
+          return;
+        }
+        lat = parseFloat(data.places[0].latitude);
+        lng = parseFloat(data.places[0].longitude);
+      } catch (err) {
+        showStatus('search-status', 'Zip code lookup failed', 'error');
+        return;
+      }
     } else {
       try {
-        const resp = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(input)}`);
-        const results = await resp.json();
-        if (results.length === 0) {
+        let url = `https://photon.komoot.io/api/?q=${encodeURIComponent(input)}&limit=1&lang=en`;
+        if (stopMap) {
+          const center = stopMap.getCenter();
+          url += `&lat=${center.lat}&lon=${center.lng}&location_bias_scale=0.5`;
+        } else if (locationBias) {
+          url += `&lat=${locationBias.lat}&lon=${locationBias.lng}&location_bias_scale=0.5`;
+        }
+        const resp = await fetch(url);
+        const data = await resp.json();
+        if (!data.features || data.features.length === 0) {
           showStatus('search-status', 'Address not found', 'error');
           return;
         }
-        lat = parseFloat(results[0].lat);
-        lng = parseFloat(results[0].lon);
+        const coords = data.features[0].geometry.coordinates;
+        lng = coords[0];
+        lat = coords[1];
       } catch (err) {
         showStatus('search-status', 'Geocoding failed', 'error');
         return;
       }
     }
 
-    const radiusMiles = parseFloat(document.getElementById('search-radius').value);
-    const offset = radiusMiles / 69;
+    clearStatus('search-status');
+    initOrUpdateMap(lat, lng);
+    await loadStopsInBounds();
+  }
 
-    try {
-      const resp = await fetch(`${API_BASE}/stops/within/${lng - offset},${lat - offset},${lng + offset},${lat + offset}`);
-      if (!resp.ok) throw new Error('API error');
+  async function searchFromCurrentLocation() {
+    showStatus('search-status', 'Getting location...', 'info');
 
-      const stops = await resp.json();
-
-      if (stops.length === 0) {
-        showStatus('search-status', 'No stops found. Try increasing radius.', 'info');
+    // Try browser geolocation first (precise GPS — works on HTTPS, Firefox on HTTP, some on .local)
+    if (navigator.geolocation) {
+      try {
+        const pos = await new Promise((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 5000 });
+        });
+        clearStatus('search-status');
+        document.getElementById('search-location').value = `${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)}`;
+        initOrUpdateMap(pos.coords.latitude, pos.coords.longitude);
+        await loadStopsInBounds();
         return;
+      } catch (e) {
+        console.log('Browser geolocation failed, trying IP fallback:', e.message);
       }
+    }
 
-      foundStops = stops;
-      clearStatus('search-status');
-      renderStopResults(stops);
-
+    // Fallback: IP-based geolocation (approximate — city level)
+    try {
+      showStatus('search-status', 'Getting approximate location...', 'info');
+      const resp = await fetch('https://ipapi.co/json/');
+      const data = await resp.json();
+      if (data.latitude && data.longitude) {
+        showStatus('search-status', 'Precise location not available. Showing approximate location — search by address for better results.', 'info');
+        locationBias = { lat: data.latitude, lng: data.longitude };
+        document.getElementById('search-location').value = `${data.latitude}, ${data.longitude}`;
+        initOrUpdateMap(data.latitude, data.longitude);
+        await loadStopsInBounds();
+      } else {
+        showStatus('search-status', 'Could not determine location', 'error');
+      }
     } catch (err) {
-      showStatus('search-status', 'Search failed', 'error');
+      showStatus('search-status', 'Could not get location', 'error');
     }
   }
 
-  function renderStopResults(stops) {
-    const container = document.getElementById('stop-results');
-    container.classList.remove('hidden');
+  function initOrUpdateMap(lat, lng) {
+    if (!Leaflet) return;
 
-    container.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <button class="btn btn-secondary" id="select-all-stops" style="padding:6px 12px;font-size:0.9em;">Select All</button>
-        <span style="color:var(--text-muted);font-size:0.85em;">${stops.length} stop${stops.length !== 1 ? 's' : ''}</span>
-      </div>
-      <ul class="stop-list" id="stop-list" style="max-height:150px;overflow-y:auto;list-style:none;padding:0;margin:0;">
-        ${stops.map(stop => `
-          <li class="route-option" data-stop-id="${stop.stopId}">
-            <div style="color:var(--text-heading);font-weight:500;">${escapeHtml(stop.name)}</div>
-            <div style="color:var(--text-dimmed);font-size:0.85em;">${stop.stopCode || stop.stopId}</div>
-          </li>
-        `).join('')}
-      </ul>
-      <div style="margin-top:8px;display:flex;gap:8px;">
-        <button class="btn btn-primary" id="btn-search-selected">Search Selected</button>
-        <button class="btn btn-secondary" id="btn-search-all">Search All</button>
-      </div>
-    `;
+    const wrap = document.getElementById('stop-map-wrap');
+    const mapContainer = document.getElementById('stop-map');
+    wrap.classList.remove('hidden');
 
-    // Track selected stops
-    const selectedStopIds = new Set();
+    if (stopMap) {
+      // Clear old markers on new address search
+      Object.values(mapStopMarkers).forEach(m => m.marker.remove());
+      mapStopMarkers = {};
+      selectedStopIds.clear();
+      updateSelectedButton();
+      if (searchMarker) searchMarker.remove();
+      stopMap.setView([lat, lng], 16);
+    } else {
+      stopMap = Leaflet.map(mapContainer).setView([lat, lng], 16);
+      Leaflet.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
+        maxZoom: 20,
+        subdomains: 'abcd',
+      }).addTo(stopMap);
+      stopMap.attributionControl.setPrefix(false);
 
-    // Stop click to toggle selection
-    container.querySelectorAll('#stop-list .route-option').forEach(item => {
-      item.addEventListener('click', () => {
-        const stopId = item.dataset.stopId;
-        if (selectedStopIds.has(stopId)) {
-          selectedStopIds.delete(stopId);
-          item.classList.remove('selected');
-        } else {
-          selectedStopIds.add(stopId);
-          item.classList.add('selected');
-        }
+      // Auto-load stops on pan/zoom
+      stopMap.on('moveend', () => {
+        clearTimeout(mapMoveTimer);
+        mapMoveTimer = setTimeout(() => loadStopsInBounds(), 500);
       });
-    });
 
-    // Select All button
-    document.getElementById('select-all-stops').addEventListener('click', () => {
-      const allSelected = selectedStopIds.size === stops.length;
-      container.querySelectorAll('#stop-list .route-option').forEach(item => {
-        const stopId = item.dataset.stopId;
-        if (allSelected) {
-          selectedStopIds.delete(stopId);
-          item.classList.remove('selected');
-        } else {
-          selectedStopIds.add(stopId);
-          item.classList.add('selected');
-        }
-      });
-    });
+      setTimeout(() => stopMap.invalidateSize(), 100);
+    }
 
-    // Store selected stops getter for search functions
-    container.getSelectedStops = () => stops.filter(s => selectedStopIds.has(s.stopId));
-
-    document.getElementById('btn-search-selected').addEventListener('click', () => {
-      const selected = container.getSelectedStops();
-      if (selected.length === 0) {
-        showStatus('search-status', 'Select at least one stop', 'error');
-        return;
-      }
-      searchRoutesForStops(selected);
-    });
-    document.getElementById('btn-search-all').addEventListener('click', () => searchRoutesForStops(stops));
+    // Blue search location marker
+    searchMarker = Leaflet.circleMarker([lat, lng], {
+      radius: 8,
+      fillColor: '#2196F3',
+      color: '#fff',
+      weight: 2,
+      fillOpacity: 0.9,
+    }).addTo(stopMap);
   }
 
-  async function searchRoutesForStops(selectedStops) {
-    showStatus('search-status', `Loading routes for ${selectedStops.length} stop${selectedStops.length !== 1 ? 's' : ''}...`, 'info');
+  async function loadStopsInBounds() {
+    if (!stopMap) return;
 
-    foundRoutes = [];
+    const bounds = stopMap.getBounds();
+    const sw = bounds.getSouthWest();
+    const ne = bounds.getNorthEast();
 
-    for (const stop of selectedStops) {
-      try {
+    try {
+      const resp = await fetch(`${API_BASE}/stops/within/${sw.lng},${sw.lat},${ne.lng},${ne.lat}`);
+      if (!resp.ok) return;
+      const stops = await resp.json();
+
+      stops.forEach(stop => {
+        if (stop.lat == null || stop.lon == null) return;
+        if (mapStopMarkers[stop.stopId]) return;
+
+        const isSelected = selectedStopIds.has(stop.stopId);
+        const marker = Leaflet.circleMarker([stop.lat, stop.lon], {
+          radius: isSelected ? 9 : 7,
+          fillColor: isSelected ? '#FF9800' : '#4CAF50',
+          color: '#fff',
+          weight: 2,
+          fillOpacity: isSelected ? 1.0 : 0.8,
+        }).addTo(stopMap);
+
+        marker.on('click', () => handleStopClick(stop));
+
+        mapStopMarkers[stop.stopId] = { marker, stop };
+      });
+    } catch (err) {
+      console.error('Error loading stops:', err);
+    }
+  }
+
+  function handleStopClick(stop) {
+    showRoutesPopup(stop);
+  }
+
+  function toggleStopSelection(stopId) {
+    if (selectedStopIds.has(stopId)) {
+      selectedStopIds.delete(stopId);
+    } else {
+      selectedStopIds.add(stopId);
+    }
+    updateMarkerStyle(stopId);
+    updateSelectedButton();
+  }
+
+  function clearStopSelection() {
+    for (const stopId of selectedStopIds) {
+      updateMarkerStyle(stopId);  // will reset since we clear after
+    }
+    const ids = [...selectedStopIds];
+    selectedStopIds.clear();
+    ids.forEach(id => updateMarkerStyle(id));
+    updateSelectedButton();
+  }
+
+  function updateMarkerStyle(stopId) {
+    const entry = mapStopMarkers[stopId];
+    if (!entry) return;
+    const isSelected = selectedStopIds.has(stopId);
+    entry.marker.setStyle({
+      fillColor: isSelected ? '#FF9800' : '#4CAF50',
+      radius: isSelected ? 9 : 7,
+      fillOpacity: isSelected ? 1.0 : 0.8,
+    });
+  }
+
+  function updateSelectedButton() {
+    const btn = document.getElementById('btn-search-selected');
+    const clearBtn = document.getElementById('btn-clear-selected');
+    if (!btn) return;
+    if (selectedStopIds.size > 0) {
+      btn.classList.remove('hidden');
+      btn.textContent = `Search ${selectedStopIds.size} selected`;
+      if (clearBtn) clearBtn.classList.remove('hidden');
+    } else {
+      btn.classList.add('hidden');
+      if (clearBtn) clearBtn.classList.add('hidden');
+    }
+  }
+
+  async function showRoutesPopup(stop) {
+    const entry = mapStopMarkers[stop.stopId];
+    if (!entry) return;
+
+    activePopupStopId = stop.stopId;
+    entry.marker.unbindPopup();
+    entry.marker.bindPopup(`<div style="min-width:180px;"><strong>${stop.name}</strong><br><small>Loading routes...</small></div>`, { maxWidth: 300 });
+    entry.marker.openPopup();
+
+    try {
+      let routes;
+      if (stopCache[stop.stopId]?.routes) {
+        routes = stopCache[stop.stopId].routes;
+      } else {
         const resp = await fetch(`${API_BASE}/stops/${stop.stopId}/routes`);
-        if (resp.ok) {
-          const routes = await resp.json();
-          stopCache[stop.stopId] = { name: stop.name, routes };
-          for (const route of routes) {
-            foundRoutes.push({
-              stopId: stop.stopId,
-              stopName: stop.name,
-              routeId: route.routeId,
-              routeName: route.name || route.routeId,
-              routeColor: route.color,
-              headsigns: route.headsigns || []
+        if (!resp.ok) throw new Error('API error');
+        routes = await resp.json();
+        stopCache[stop.stopId] = { name: stop.name, routes };
+      }
+
+      if (activePopupStopId !== stop.stopId) return; // User clicked another stop
+
+      const routeHtml = routes.map(r => {
+        const alreadyAdded = currentRoutes.some(cr => cr.routeId === r.routeId && cr.stopId === stop.stopId);
+        const color = r.color ? '#' + r.color : '#333';
+        const headsignText = r.headsigns?.length ? `<div style="color:#888;font-size:0.8em;">${r.headsigns.join(', ')}</div>` : '';
+        return `
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid #eee;">
+            <div style="flex:1;min-width:0;">
+              <strong style="color:${color}">${r.name || r.routeId}</strong>
+              ${headsignText}
+            </div>
+            ${alreadyAdded
+              ? `<span style="color:#4CAF50;margin-left:8px;">✓</span>`
+              : `<button onclick="document.dispatchEvent(new CustomEvent('tt-add-route', {detail:{routeId:'${r.routeId}',stopId:'${stop.stopId}',routeName:'${(r.name || r.routeId).replace(/'/g, "\\'")}',headsign:'${(r.headsigns?.[0] || '').replace(/'/g, "\\'")}',routeColor:'${r.color || ''}',stopName:'${stop.name.replace(/'/g, "\\'")}'} }))" style="background:#2196F3;color:#fff;border:none;border-radius:3px;padding:2px 8px;font-size:0.8em;cursor:pointer;margin-left:8px;white-space:nowrap;">+ Add</button>`
+            }
+          </div>`;
+      }).join('');
+
+      const isSelected = selectedStopIds.has(stop.stopId);
+      const selectBtnLabel = isSelected ? 'Deselect from search' : 'Select for search';
+      const selectBtnStyle = isSelected
+        ? 'background:#757575;color:#fff;border:none;border-radius:3px;padding:4px 10px;font-size:0.8em;cursor:pointer;margin-top:8px;width:100%;'
+        : 'background:none;color:#2196F3;border:1px solid #2196F3;border-radius:3px;padding:4px 10px;font-size:0.8em;cursor:pointer;margin-top:8px;width:100%;';
+
+      entry.marker.setPopupContent(`<div style="min-width:200px;max-height:250px;overflow-y:auto;"><strong>${stop.name}</strong><div style="margin-top:6px;">${routeHtml || '<span style="color:#888;">No routes</span>'}</div><button onclick="document.dispatchEvent(new CustomEvent('tt-toggle-stop', {detail:{stopId:'${stop.stopId}'}}))" style="${selectBtnStyle}">${selectBtnLabel}</button></div>`);
+
+    } catch (err) {
+      entry.marker.setPopupContent(`<div><strong>${stop.name}</strong><br><small style="color:#d32f2f;">Failed to load routes</small></div>`);
+    }
+  }
+
+  async function searchSelectedStops() {
+    if (selectedStopIds.size === 0) return;
+    await searchStopsForRoutePanel(
+      Object.values(mapStopMarkers).filter(m => selectedStopIds.has(m.stop.stopId)).map(m => m.stop),
+      `Routes at ${selectedStopIds.size} selected stops`
+    );
+  }
+
+  async function searchVisibleStops() {
+    if (!stopMap) return;
+    const visibleStops = Object.values(mapStopMarkers)
+      .filter(m => stopMap.getBounds().contains(m.marker.getLatLng()))
+      .map(m => m.stop);
+    if (visibleStops.length === 0) {
+      const panel = document.getElementById('route-panel');
+      panel.classList.remove('hidden');
+      panel.innerHTML = `<div style="color:var(--text-muted);padding:12px;">No stops visible on map</div>`;
+      return;
+    }
+    await searchStopsForRoutePanel(visibleStops, `Routes at ${visibleStops.length} visible stops`);
+  }
+
+  async function searchStopsForRoutePanel(stops, title) {
+    const panel = document.getElementById('route-panel');
+    panel.classList.remove('hidden');
+    panel.innerHTML = `<div style="color:var(--text-muted);padding:12px;">Loading routes for ${stops.length} stops...</div>`;
+
+    routePanelRoutes = [];
+    for (const stop of stops) {
+      try {
+        if (stopCache[stop.stopId]?.routes) {
+          const routes = stopCache[stop.stopId].routes;
+          for (const r of routes) {
+            routePanelRoutes.push({
+              stopId: stop.stopId, stopName: stop.name,
+              routeId: r.routeId, routeName: r.name || r.routeId,
+              routeColor: r.color, headsigns: r.headsigns || [],
             });
+          }
+        } else {
+          const resp = await fetch(`${API_BASE}/stops/${stop.stopId}/routes`);
+          if (resp.ok) {
+            const routes = await resp.json();
+            stopCache[stop.stopId] = { name: stop.name, routes };
+            for (const r of routes) {
+              routePanelRoutes.push({
+                stopId: stop.stopId, stopName: stop.name,
+                routeId: r.routeId, routeName: r.name || r.routeId,
+                routeColor: r.color, headsigns: r.headsigns || [],
+              });
+            }
           }
         }
       } catch (err) {
@@ -1870,99 +2222,79 @@
       }
     }
 
-    if (foundRoutes.length === 0) {
-      showStatus('search-status', 'No routes found', 'info');
-      return;
-    }
-
-    clearStatus('search-status');
-    renderRouteResults();
+    renderRoutePanel(title, routePanelRoutes);
   }
 
-  function renderRouteResults() {
-    const container = document.getElementById('route-results');
-    container.classList.remove('hidden');
-    selectedRoutes.clear();
+  function renderRoutePanel(title, routes) {
+    const panel = document.getElementById('route-panel');
+    panel.classList.remove('hidden');
 
-    container.innerHTML = `
-      <input type="text" id="filter-routes" placeholder="Filter routes..." class="search-input" style="margin-bottom:8px;">
-      <ul class="route-results-list" id="route-results-list" style="max-height:200px;overflow-y:auto;"></ul>
-      <button class="btn btn-primary" id="btn-add-routes" style="margin-top:8px;">Add Selected Routes</button>
+    panel.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <strong style="color:var(--text-heading);font-size:0.95em;">${escapeHtml(title)}</strong>
+        <span style="color:var(--text-muted);font-size:0.85em;">${routes.length} route${routes.length !== 1 ? 's' : ''}</span>
+      </div>
+      ${routes.length > 5 ? `<input type="text" id="filter-routes" placeholder="Filter routes..." class="search-input" style="margin-bottom:8px;">` : ''}
+      <ul class="route-results-list" id="route-panel-list" style="max-height:250px;overflow-y:auto;list-style:none;padding:0;margin:0;"></ul>
     `;
 
-    renderFilteredRoutes(foundRoutes);
+    renderRoutePanelItems(routes);
 
-    document.getElementById('filter-routes').addEventListener('input', (e) => {
-      const filter = e.target.value.toLowerCase();
-      const filtered = foundRoutes.filter(r =>
-        r.routeName.toLowerCase().includes(filter) ||
-        r.headsigns.some(h => h.toLowerCase().includes(filter)) ||
-        r.stopName.toLowerCase().includes(filter)
-      );
-      renderFilteredRoutes(filtered);
-    });
-
-    document.getElementById('btn-add-routes').addEventListener('click', addSelectedRoutes);
+    const filterInput = document.getElementById('filter-routes');
+    if (filterInput) {
+      filterInput.addEventListener('input', (e) => {
+        const filter = e.target.value.toLowerCase();
+        const filtered = routes.filter(r =>
+          r.routeName.toLowerCase().includes(filter) ||
+          r.headsigns.some(h => h.toLowerCase().includes(filter)) ||
+          r.stopName.toLowerCase().includes(filter)
+        );
+        renderRoutePanelItems(filtered);
+      });
+    }
   }
 
-  function renderFilteredRoutes(routes) {
-    const list = document.getElementById('route-results-list');
+  function renderRoutePanelItems(routes) {
+    const list = document.getElementById('route-panel-list');
 
     list.innerHTML = routes.map(r => {
-      const key = `${r.routeId}|${r.stopId}`;
       const alreadyAdded = currentRoutes.some(cr => cr.routeId === r.routeId && cr.stopId === r.stopId);
       return `
-        <li class="route-option ${selectedRoutes.has(key) ? 'selected' : ''}" 
-            data-key="${key}" 
-            data-route-id="${r.routeId}" 
-            data-stop-id="${r.stopId}"
-            data-route-name="${escapeHtml(r.routeName)}"
-            data-stop-name="${escapeHtml(r.stopName)}"
-            data-headsign="${escapeHtml(r.headsigns[0] || '')}">
-          <div>
-            <strong style="color:${r.routeColor ? '#' + r.routeColor : 'var(--text-heading)'}">${escapeHtml(r.routeName)}</strong>
-            <span style="color:var(--text-muted);margin-left:8px;">@ ${escapeHtml(r.stopName)}</span>
-            ${alreadyAdded ? '<span style="color:var(--accent-green);margin-left:8px;">✓</span>' : ''}
+        <li style="display:flex;align-items:center;justify-content:space-between;padding:10px;margin:4px 0;background:var(--bg-tertiary);border-radius:4px;">
+          <div style="flex:1;min-width:0;">
+            <div>
+              <strong style="color:${r.routeColor ? '#' + r.routeColor : 'var(--text-heading)'}">${escapeHtml(r.routeName)}</strong>
+              <span style="color:var(--text-muted);margin-left:8px;font-size:0.9em;">@ ${escapeHtml(r.stopName)}</span>
+            </div>
+            ${r.headsigns.length ? `<div style="color:var(--text-dimmed);font-size:0.85em;margin-top:2px;">${escapeHtml(r.headsigns.join(', '))}</div>` : ''}
           </div>
-          ${r.headsigns.length ? `<div style="color:var(--text-dimmed);font-size:0.85em;margin-top:4px;">→ ${escapeHtml(r.headsigns.join(', '))}</div>` : ''}
+          ${alreadyAdded
+            ? `<span style="color:var(--accent-green);font-size:1.1em;margin-left:8px;">✓</span>`
+            : `<button class="btn btn-primary btn-add-route" style="padding:4px 10px;font-size:0.85em;margin-left:8px;white-space:nowrap;"
+                data-route-id="${r.routeId}" data-stop-id="${r.stopId}"
+                data-route-name="${escapeHtml(r.routeName)}" data-stop-name="${escapeHtml(r.stopName)}"
+                data-headsign="${escapeHtml(r.headsigns[0] || '')}" data-route-color="${r.routeColor || ''}">+ Add</button>`
+          }
         </li>
       `;
     }).join('');
 
-    list.querySelectorAll('.route-option').forEach(item => {
-      item.addEventListener('click', () => {
-        const key = item.dataset.key;
-        if (selectedRoutes.has(key)) {
-          selectedRoutes.delete(key);
-          item.classList.remove('selected');
-        } else {
-          selectedRoutes.add(key);
-          item.classList.add('selected');
-        }
+    list.querySelectorAll('.btn-add-route').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        addRoute(
+          btn.dataset.routeId, btn.dataset.stopId,
+          btn.dataset.routeName, btn.dataset.headsign,
+          btn.dataset.routeColor || null, btn.dataset.stopName
+        );
+        const filterInput = document.getElementById('filter-routes');
+        const filter = filterInput?.value?.toLowerCase() || '';
+        const filtered = filter
+          ? routePanelRoutes.filter(r => r.routeName.toLowerCase().includes(filter) || r.headsigns.some(h => h.toLowerCase().includes(filter)) || r.stopName.toLowerCase().includes(filter))
+          : routePanelRoutes;
+        renderRoutePanelItems(filtered);
       });
     });
-  }
-
-  function addSelectedRoutes() {
-    for (const key of selectedRoutes) {
-      const item = document.querySelector(`.route-option[data-key="${key}"]`);
-      if (item) {
-        // Find the route in foundRoutes to get color
-        const route = foundRoutes.find(r => `${r.routeId}|${r.stopId}` === key);
-        addRoute(
-          item.dataset.routeId,
-          item.dataset.stopId,
-          item.dataset.routeName,
-          item.dataset.headsign,
-          route?.routeColor || null,
-          item.dataset.stopName
-        );
-      }
-    }
-
-    selectedRoutes.clear();
-    document.getElementById('stop-results').classList.add('hidden');
-    document.getElementById('route-results').classList.add('hidden');
   }
 
   // ============================================================================

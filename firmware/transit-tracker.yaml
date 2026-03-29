@@ -376,5 +376,6 @@ web_server:
 
 transit_tracker:
   id: tracker
+  limit: 3
 
 # serial_rpc:  # Disabled — see external_components comment above
